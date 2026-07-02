@@ -1,0 +1,7 @@
+third_party/
+__pycache__/
+*.pyc
+build/dist/
+build/build/
+.pytest_cache/
+*.spec.bak
