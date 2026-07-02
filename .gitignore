@@ -1,7 +1,22 @@
-third_party/
+# Vendored SDKs (cloned by build script, not committed)
+/third_party/
+
+# Python
 __pycache__/
 *.pyc
-build/dist/
-build/build/
 .pytest_cache/
+.venv/
+
+# Build output
+/bridge/build/
+/build/dist/
+/build/build/
+/dist/
 *.spec.bak
+
+# Runtime artifacts
+voltshift_config.json
+voltshift_crashes.log
+voltshift_telemetry.json
+voltshift_heartbeat
+profiles/*.json
