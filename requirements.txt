@@ -1,0 +1,8 @@
+# VoltShift Python dependencies (Python 3.12)
+customtkinter>=5.2      # modern dark GUI
+psutil>=5.9             # app-boost process watcher
+pywin32>=306            # Windows Event Log access for the crash logger
+
+# Build/test only:
+# pyinstaller>=6.0       # standalone .exe
+# pytest>=8.0            # unit tests

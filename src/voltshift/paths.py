@@ -19,9 +19,18 @@ def app_dir() -> str:
 
 
 def bridge_path() -> str:
-    """Locate voltshift_bridge.exe: next to the app first, then the dev build."""
-    candidates = [
+    """Locate voltshift_bridge.exe.
+
+    Checks, in order: PyInstaller's bundle dir (`_internal/` in a onedir
+    build, via sys._MEIPASS), next to the app, and the dev CMake output.
+    """
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "voltshift_bridge.exe"))
+    candidates += [
         os.path.join(app_dir(), "voltshift_bridge.exe"),
+        os.path.join(app_dir(), "_internal", "voltshift_bridge.exe"),
         os.path.join(app_dir(), "bridge", "build", "Release", "voltshift_bridge.exe"),
     ]
     for path in candidates:
