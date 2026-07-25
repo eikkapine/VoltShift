@@ -15,11 +15,12 @@ import json
 import os
 from typing import Callable, Optional
 
-from .. import paths
+from .. import autostack, paths
 from ..appboost import AppBoostWatcher, BoostConfig
 from ..bridgeclient import BridgeClient, BridgeError
 from ..crashlog import CrashLogger
 from ..engine import EngineConfig
+from ..optimizer.objective import DEFAULT_GOAL
 from ..runner import EngineRunner
 
 
@@ -38,6 +39,14 @@ class AppState:
         self.runner: Optional[EngineRunner] = None
         self.crash_logger: Optional[CrashLogger] = None
         self.appboost: Optional[AppBoostWatcher] = None
+
+        # Closed-loop stack (telemetry, optimiser, safety, memory). Built on
+        # connect so pages can assume it exists whenever `connected` is True.
+        self.stack: Optional[autostack.AutoStack] = None
+        self.autotune = None
+        self.governor = None
+        self.goal = DEFAULT_GOAL
+        self.recovery_notice: Optional[str] = None
 
         # Subscribers (all invoked on the Tk main thread).
         self.log_sinks: list[Callable[[str, str], None]] = []
@@ -74,14 +83,41 @@ class AppState:
             self.crash_logger = CrashLogger(self.engine_config.to_dict())
             self.crash_logger.on_log_entry = self.log
             self.crash_logger.check_previous_session()
+            self._build_stack()
             return True
         except BridgeError as exc:
             self.connected = False
             self.connect_error = str(exc)
             return False
 
+    def _build_stack(self) -> None:
+        """Wire telemetry, optimiser and safety, then start the one poller.
+
+        Recovery runs before anything else touches the GPU: if the previous
+        session died mid-change, the machine goes back to a known-good state
+        before the user can start another experiment on top of it.
+        """
+        try:
+            self.stack = autostack.build(self.bridge, on_log=self.log)
+            self.recovery_notice = autostack.recover_previous_session(self.stack)
+            if self.recovery_notice:
+                self.log(self.recovery_notice, "error")
+            self.stack.hub.subscribe(self._dispatch_hub_sample)
+            self.stack.hub.start()
+            self.log(f"telemetry — {self.stack.frame_source_status}")
+        except Exception as exc:
+            self.stack = None
+            self.log(f"closed-loop features unavailable: {exc}", "warn")
+
+    def _dispatch_hub_sample(self, sample) -> None:
+        self._dispatch_sample(sample.as_dict())
+
     def gpu_name(self) -> str:
         return self.info.get("name", "No GPU")
+
+    @property
+    def has_stack(self) -> bool:
+        return self.stack is not None and self.stack.tunable
 
     # ── dynamic voltage engine ───────────────────────────────────────────────
 
@@ -93,9 +129,16 @@ class AppState:
             self.crash_logger.start()
             self.crash_logger.write_session_header(self.gpu_name(),
                                                    self.engine_config.to_dict())
-        self.runner = EngineRunner(self.bridge, self.engine_config, self.crash_logger)
+        # Share the telemetry hub when it exists so the bridge is polled once
+        # for the whole application rather than once per feature.
+        hub = self.stack.hub if self.stack is not None else None
+        self.runner = EngineRunner(self.bridge, self.engine_config,
+                                   self.crash_logger, hub=hub)
         self.runner.on_log_entry = lambda m, lvl: self.log(m, lvl)
-        self.runner.on_sample = self._dispatch_sample
+        # With a hub the samples already reach subscribers; without one the
+        # runner is the only poller and must feed them itself.
+        if hub is None:
+            self.runner.on_sample = self._dispatch_sample
         self.runner.on_error = lambda m: self.log(m, "error")
         self.runner.start()
 
@@ -154,16 +197,105 @@ class AppState:
             json.dump(data, f, indent=2)
         os.replace(tmp, paths.config_path())
 
+    # ── closed loop ──────────────────────────────────────────────────────────
+
+    def verify_controls(self, force: bool = False) -> bool:
+        """Narrow the search space to controls this card actually honours.
+
+        Runs once per card and caches the result, because it writes to the
+        GPU. Returns False when nothing the driver advertises turns out to
+        respond, which is the one case where tuning cannot proceed.
+        """
+        if self.stack is None:
+            return False
+        if self.stack.verified and not force:
+            return self.stack.tunable
+        try:
+            self.stack.verify_controls(force=force, on_log=self.log)
+        except Exception as exc:
+            self.log(f"control verification failed: {exc}", "error")
+            return self.stack.tunable
+        if not self.stack.tunable:
+            self.log("none of this GPU's advertised tuning controls respond "
+                     "to writes", "error")
+            return False
+        self.log(f"tuning controls in use: {', '.join(self.stack.space.names)}")
+        return True
+
+    def start_autotune(self, session_config, exe: str = "desktop"):
+        """Begin an auto-tune session; returns it, or None if unavailable."""
+        from ..optimizer.session import AutoTuneSession
+
+        if not self.has_stack:
+            self.log("no tunable controls on this GPU", "error")
+            return None
+        if self.autotune is not None and self.autotune.running:
+            return self.autotune
+        if not self.verify_controls():
+            return None
+
+        stack = self.stack
+        self.autotune = AutoTuneSession(
+            stack.hub, stack.applier, stack.space, stack.safeguard,
+            stack.new_optimizer(), session_config,
+            knowledge=stack.knowledge, watchdog=stack.watchdog,
+            stability=stack.stability, gpu_key=stack.gpu_key, exe=exe)
+        self.autotune.on_log = self.log
+        self.autotune.start()
+        return self.autotune
+
+    def stop_autotune(self) -> None:
+        if self.autotune is not None:
+            self.autotune.stop()
+
+    @property
+    def autotune_running(self) -> bool:
+        return self.autotune is not None and self.autotune.running
+
+    def start_governor(self, budget=None):
+        from ..adaptive import AdaptiveGovernor
+
+        if not self.has_stack:
+            self.log("no tunable controls on this GPU", "error")
+            return None
+        if self.governor is not None and self.governor.running:
+            return self.governor
+        if not self.verify_controls():
+            return None
+
+        stack = self.stack
+        self.governor = AdaptiveGovernor(
+            stack.hub, stack.applier, stack.space, stack.safeguard,
+            knowledge=stack.knowledge, watchdog=stack.watchdog,
+            stability=stack.stability, gpu_key=stack.gpu_key,
+            goal=self.goal, budget=budget)
+        self.governor.on_log = self.log
+        self.governor.start()
+        return self.governor
+
+    def stop_governor(self) -> None:
+        if self.governor is not None:
+            self.governor.stop(restore=True)
+
+    @property
+    def governor_running(self) -> bool:
+        return self.governor is not None and self.governor.running
+
     # ── teardown ─────────────────────────────────────────────────────────────
 
     def shutdown(self) -> None:
         self._closing = True
-        try:
-            self.stop_engine()
-        except Exception:
-            pass
-        try:
-            self.stop_appboost()
-        except Exception:
-            pass
+        # Order matters: stop anything that writes to the GPU before the
+        # bridge goes away, so every restore path can still reach the driver.
+        for stop in (self.stop_autotune, self.stop_governor,
+                     self.stop_engine, self.stop_appboost):
+            try:
+                stop()
+            except Exception:
+                pass
+        if self.stack is not None:
+            try:
+                self.stack.close()
+            except Exception:
+                pass
         self.bridge.stop()

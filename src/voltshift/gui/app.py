@@ -15,6 +15,8 @@ from ..bridgeclient import BridgeError
 from . import theme
 from .state import AppState
 from .pages.dashboard import DashboardPage
+from .pages.autotune import AutoTunePage
+from .pages.adaptive import AdaptivePage
 from .pages.voltage import VoltagePage
 from .pages.tuning import TuningPage
 from .pages.fans import FansPage
@@ -29,6 +31,8 @@ ctk.set_appearance_mode("dark")
 
 NAV = [
     ("Dashboard", DashboardPage),
+    ("Auto-Tune", AutoTunePage),
+    ("Adaptive", AdaptivePage),
     ("Dynamic Voltage", VoltagePage),
     ("Tuning", TuningPage),
     ("Fans", FansPage),
@@ -171,8 +175,12 @@ class VoltShiftApp(ctk.CTk):
     def _poll_idle(self) -> None:
         if self._closing:
             return
-        # When the engine runs it already streams samples; otherwise poll here.
-        if self.state_mgr.connected and not self.state_mgr.engine_running:
+        # The telemetry hub, when running, is the single poller for the whole
+        # app and already streams samples to every sink. This fallback only
+        # covers the case where the hub could not be built.
+        hub = self.state_mgr.stack.hub if self.state_mgr.stack else None
+        hub_live = hub is not None and hub.running
+        if self.state_mgr.connected and not hub_live and not self.state_mgr.engine_running:
             try:
                 sample = self.state_mgr.bridge.metrics()
                 for sink in self.state_mgr.sample_sinks:

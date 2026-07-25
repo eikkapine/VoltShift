@@ -20,4 +20,11 @@ voltshift_config.json
 voltshift_crashes.log
 voltshift_telemetry.json
 voltshift_heartbeat
+voltshift_session.json
+voltshift_journal.json
+voltshift_known_good.json
+voltshift_knowledge.db
 profiles/*.json
+
+# CodeGraph index
+.codegraph/

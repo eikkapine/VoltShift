@@ -1,5 +1,9 @@
 """VoltShift command-line interface.
 
+    voltshift autotune            find the best settings for what is running now
+    voltshift adaptive            live governor: learn and adapt while you play
+    voltshift verify              measure which tuning controls this GPU honours
+    voltshift knowledge ...       inspect what has been learned about this card
     voltshift run                 run the dynamic voltage engine (Ctrl+C stops + resets)
     voltshift info                GPU + capability summary
     voltshift metrics [-w]        one-shot or watch live metrics
@@ -16,6 +20,7 @@ import argparse
 import json
 import signal
 import sys
+import threading
 import time
 
 from . import APP_NAME, __version__, paths
@@ -254,6 +259,201 @@ def cmd_reset(_args) -> int:
     return 0
 
 
+# ── closed loop ───────────────────────────────────────────────────────────────
+
+def _with_stack(fn, verify: bool = True):
+    """Build the auto-tuning stack, run `fn(stack)`, then tear it down.
+
+    `verify` measures which controls the card actually honours before tuning
+    starts. It writes to the GPU, so read-only commands pass verify=False.
+    """
+    from . import autostack, gpuprofile
+
+    with BridgeClient() as bridge:
+        stack = autostack.build(bridge, on_log=_log)
+        try:
+            recovery = autostack.recover_previous_session(stack)
+            if recovery:
+                _log(recovery, "error")
+            if not stack.tunable:
+                _log("this GPU exposes no manual tuning controls", "error")
+                return 1
+
+            note = gpuprofile.arch_note(stack.space)
+            if note:
+                _log(note)
+            if verify:
+                stack.verify_controls(on_log=_log)
+                if not stack.tunable:
+                    _log("none of this GPU's advertised tuning controls "
+                         "actually respond to writes", "error")
+                    return 1
+                _log(f"tuning controls in use: {', '.join(stack.space.names)}")
+
+            stack.hub.start()
+            return fn(stack)
+        finally:
+            stack.close()
+
+
+def cmd_verify(args) -> int:
+    """Measure which tuning controls this GPU honours."""
+    from . import autostack, gpuprofile
+
+    _banner("verifying tuning controls")
+    with BridgeClient() as bridge:
+        stack = autostack.build(bridge, on_log=_log)
+        try:
+            if not stack.tunable:
+                _log("this GPU exposes no manual tuning controls", "error")
+                return 1
+            note = gpuprofile.arch_note(stack.space)
+            if note:
+                print(f"  {note}\n")
+            advertised = list(stack.space.names)
+            checks = stack.verify_controls(force=args.force, on_log=_log)
+            print()
+            for check in checks:
+                mark = "✓" if check.supported else "✗"
+                colour = C.GREEN if check.supported else C.YELLOW
+                print(f"  {colour}{mark} {check.name:<18}{C.RESET} {check.detail}")
+            print()
+            _log(f"advertised by ADLX : {', '.join(advertised)}")
+            _log(f"actually usable    : {', '.join(stack.space.names) or 'none'}")
+        finally:
+            stack.close()
+    return 0
+
+
+def cmd_autotune(args) -> int:
+    from .optimizer.session import AutoTuneSession, SessionConfig
+    from .optimizer.objective import GOALS
+    from .gameproc import detect_game
+
+    _banner(f"auto-tune — {GOALS[args.goal].label}")
+
+    def run(stack) -> int:
+        _log(f"frame source — {stack.frame_source_status}")
+        if stack.hub.frame_source.name == "none":
+            _log("no frame source: tuning on power, clocks and thermals only. "
+                 "Run scripts/fetch_presentmon.ps1 for frame-rate aware tuning.", "warn")
+
+        game = detect_game(stack.hub.frame_source)
+        exe = args.game or (game.exe if game else "desktop")
+        _log(f"target workload: {exe}")
+
+        session = AutoTuneSession(
+            stack.hub, stack.applier, stack.space, stack.safeguard,
+            stack.new_optimizer(),
+            SessionConfig(goal=args.goal, trials=args.trials,
+                          window_sec=args.window, pairs_per_trial=args.pairs),
+            knowledge=stack.knowledge, watchdog=stack.watchdog,
+            stability=stack.stability, gpu_key=stack.gpu_key, exe=exe)
+        session.on_log = _log
+
+        done = threading.Event()
+        session.on_done = lambda report: done.set()
+
+        def interrupt(_sig, _frame):
+            _log("stopping — restoring baseline", "warn")
+            session.stop()
+            done.set()
+
+        signal.signal(signal.SIGINT, interrupt)
+        session.start()
+        while not done.wait(0.5) and session.running:
+            pass
+        session.stop()
+
+        report = session.report
+        if report is None:
+            return 1
+        if report.best_config:
+            print()
+            _log(f"applied: {stack.space.describe(report.best_config)}", "volt")
+            _log(f"result: {report.best_score.explain()}", "volt")
+        else:
+            _log(report.message)
+        return 0
+
+    return _with_stack(run)
+
+
+def cmd_adaptive(args) -> int:
+    from .adaptive import AdaptiveGovernor, ProbeBudget
+    from .optimizer.objective import GOALS
+
+    _banner(f"adaptive governor — {GOALS[args.goal].label}")
+
+    def run(stack) -> int:
+        _log(f"frame source — {stack.frame_source_status}")
+        budget = ProbeBudget(max_probes=args.probes,
+                             min_interval_sec=args.probe_interval)
+        if args.probes == 0:
+            _log("probing disabled — applying learned profiles only")
+        else:
+            _log(f"probe budget: {args.probes} per game, "
+                 f"at most one every {args.probe_interval:.0f}s")
+
+        governor = AdaptiveGovernor(
+            stack.hub, stack.applier, stack.space, stack.safeguard,
+            knowledge=stack.knowledge, watchdog=stack.watchdog,
+            stability=stack.stability, gpu_key=stack.gpu_key,
+            goal=args.goal, budget=budget)
+        governor.on_log = _log
+
+        stop = threading.Event()
+        signal.signal(signal.SIGINT, lambda *_: stop.set())
+        governor.start()
+        _log("running — Ctrl+C to stop and restore")
+        try:
+            while not stop.wait(1.0):
+                pass
+        finally:
+            governor.stop(restore=True)
+        return 0
+
+    return _with_stack(run)
+
+
+def cmd_knowledge(args) -> int:
+    from .knowledge import KnowledgeStore, gpu_key
+
+    with BridgeClient() as bridge:
+        key = gpu_key(bridge.info())
+    store = KnowledgeStore()
+    try:
+        if args.knowledge_cmd == "stats":
+            stats = store.stats(key)
+            _banner("what VoltShift has learned")
+            print(f"  observations   {stats['observations']}")
+            print(f"  games          {stats['games']}")
+            print(f"  unsafe configs {stats['unsafe']}")
+            print(f"  frontier bands {stats['frontier_bands']}")
+            frontier = store.frontier(key)
+            if frontier:
+                print("\n  stability frontier (lowest voltage that misbehaved):")
+                for band in frontier:
+                    print(f"    ~{band['clock_mhz']:>5} MHz   {band['failed_mv']:+5d} mV"
+                          f"   ({band['failures']} event(s))")
+        elif args.knowledge_cmd == "games":
+            games = store.known_games(key)
+            if not games:
+                _log("nothing learned yet — run `voltshift autotune` while playing")
+            for entry in games:
+                config = store.best_config(key, entry["exe"], entry["goal"])
+                print(f"  {entry['exe']:<28} {entry['goal']:<12} "
+                      f"score {entry['score']:+.3f}   {config}")
+        elif args.knowledge_cmd == "forget":
+            store.forget_game(key, args.game)
+            _log(f"forgot everything learned about {args.game}")
+        elif args.knowledge_cmd == "export":
+            print(json.dumps(store.export(), indent=2))
+    finally:
+        store.close()
+    return 0
+
+
 # ── parser ────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -331,6 +531,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     reset = sub.add_parser("reset", help="restore AMD factory tuning")
     reset.set_defaults(fn=cmd_reset)
+
+    from .optimizer.objective import DEFAULT_GOAL, GOALS
+
+    auto = sub.add_parser("autotune",
+                          help="find the best settings for the running workload")
+    auto.add_argument("--goal", choices=sorted(GOALS), default=DEFAULT_GOAL,
+                      help="what to optimise for (default: %(default)s)")
+    auto.add_argument("--trials", type=int, default=14,
+                      help="how many configurations to try (default: %(default)s)")
+    auto.add_argument("--window", type=float, default=8.0,
+                      help="seconds measured per window (default: %(default)s)")
+    auto.add_argument("--pairs", type=int, default=2,
+                      help="candidate/baseline pairs per trial (default: %(default)s)")
+    auto.add_argument("--game", help="attribute results to this exe name")
+    auto.set_defaults(fn=cmd_autotune)
+
+    adaptive = sub.add_parser("adaptive",
+                              help="run the live governor while you play")
+    adaptive.add_argument("--goal", choices=sorted(GOALS), default=DEFAULT_GOAL)
+    adaptive.add_argument("--probes", type=int, default=8,
+                          help="in-game experiments allowed per game, 0 to disable")
+    adaptive.add_argument("--probe-interval", type=float, default=120.0,
+                          help="minimum seconds between probes (default: %(default)s)")
+    adaptive.set_defaults(fn=cmd_adaptive)
+
+    knowledge = sub.add_parser("knowledge", help="inspect what VoltShift has learned")
+    knowledge_sub = knowledge.add_subparsers(dest="knowledge_cmd", required=True)
+    knowledge_sub.add_parser("stats", help="summary and stability frontier")
+    knowledge_sub.add_parser("games", help="best configuration per game")
+    knowledge_sub.add_parser("export", help="dump everything as JSON")
+    p = knowledge_sub.add_parser("forget", help="erase what was learned for a game")
+    p.add_argument("game", help="exe name, e.g. cyberpunk2077.exe")
+    knowledge.set_defaults(fn=cmd_knowledge)
+
+    verify = sub.add_parser(
+        "verify", help="measure which tuning controls this GPU actually honours")
+    verify.add_argument("--force", action="store_true",
+                        help="re-test even if this card was already verified")
+    verify.set_defaults(fn=cmd_verify)
 
     return parser
 
