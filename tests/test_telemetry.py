@@ -45,10 +45,39 @@ def test_sample_perf_per_watt_prefers_frames():
     sample = Sample(t=0.0, board_w=200.0, gpu_util_pct=99.0, frames=frames)
     assert sample.perf_per_watt == pytest.approx(100.0 / 200.0)
 
-    blind = Sample(t=0.0, board_w=200.0, gpu_util_pct=50.0)
-    assert blind.perf_per_watt == pytest.approx(0.25)
-
     assert Sample(t=0.0, board_w=0).perf_per_watt is None
+
+
+def test_blind_efficiency_uses_clock_not_utilisation_alone():
+    """Utilisation saturates under load, so it cannot carry the signal.
+
+    Numbers taken from a real Dead by Daylight session: utilisation held
+    87-92% throughout while the clock did the actual varying.
+    """
+    healthy = Sample(t=0.0, clock_mhz=3215, gpu_util_pct=89.0, board_w=237.0)
+    # Same load, same utilisation, but the card is throttling badly — this is
+    # what an over-aggressive undervolt looks like without a frame source.
+    throttled = Sample(t=0.0, clock_mhz=2100, gpu_util_pct=89.0, board_w=180.0)
+
+    assert throttled.perf_per_watt < healthy.perf_per_watt, (
+        "a throttling undervolt must not score as an efficiency win")
+
+    # The old utilisation-only proxy got this exactly backwards.
+    util_only_healthy = 89.0 / 237.0
+    util_only_throttled = 89.0 / 180.0
+    assert util_only_throttled > util_only_healthy
+
+
+def test_blind_efficiency_still_rewards_a_genuine_win():
+    """Same clock and load for less power is a real efficiency gain."""
+    before = Sample(t=0.0, clock_mhz=3215, gpu_util_pct=89.0, board_w=237.0)
+    after = Sample(t=0.0, clock_mhz=3215, gpu_util_pct=89.0, board_w=205.0)
+    assert after.perf_per_watt > before.perf_per_watt
+
+
+def test_blind_efficiency_falls_back_without_a_clock():
+    assert Sample(t=0.0, gpu_util_pct=50.0, board_w=200.0).perf_per_watt == \
+        pytest.approx(0.25)
 
 
 def test_sample_from_metrics_maps_bridge_keys():

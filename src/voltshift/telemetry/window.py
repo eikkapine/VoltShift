@@ -54,12 +54,19 @@ class WindowStats:
 
         fps_avg = mean([s.frames.fps_avg for s in framed]) if framed else None
         board_w = mean([s.board_w for s in samples])
+        clock_mean = mean([s.clock_mhz for s in samples])
         perf_per_watt = None
         if fps_avg is not None and board_w:
             perf_per_watt = fps_avg / board_w
         elif board_w:
+            # Blind mode: clock x utilisation, not utilisation alone. See
+            # Sample.perf_per_watt — utilisation saturates under a GPU-bound
+            # load, so on its own it would score a throttling undervolt as an
+            # efficiency win.
             util = mean([s.gpu_util_pct for s in samples])
-            if util is not None:
+            if util is not None and clock_mean:
+                perf_per_watt = (clock_mean * util / 100.0) / board_w
+            elif util is not None:
                 perf_per_watt = util / board_w
 
         hotspots = [s.hotspot_c for s in samples if s.hotspot_c is not None]

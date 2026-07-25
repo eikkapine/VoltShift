@@ -149,16 +149,25 @@ class Sample:
 
     @property
     def perf_per_watt(self) -> Optional[float]:
-        """Frames per joule when frames are known, else utilisation per watt.
+        """Frames per joule when frames are known, else a throughput proxy.
 
-        The fallback keeps efficiency comparisons meaningful on machines with
-        no frame source, though it can only see the GPU working — not whether
-        that work reached the screen on time.
+        The blind fallback deliberately does *not* use utilisation per watt.
+        Under a GPU-bound load utilisation pins near 90% whether frames are
+        arriving well or badly, so `util / watts` would score any power
+        reduction as a win — including one caused by an undervolt throttling
+        the card. Measured on a real session: utilisation held 87-92% while
+        the clock carried all the actual signal.
+
+        Multiplying by clock fixes that. Downclocking is how an unstable or
+        over-aggressive undervolt actually loses performance, and the clock
+        term registers it immediately.
         """
         if not self.board_w or self.board_w <= 0:
             return None
         if self.frames:
             return self.frames.fps_avg / self.board_w
+        if self.gpu_util_pct is not None and self.clock_mhz:
+            return (self.clock_mhz * self.gpu_util_pct / 100.0) / self.board_w
         if self.gpu_util_pct is not None:
             return self.gpu_util_pct / self.board_w
         return None
