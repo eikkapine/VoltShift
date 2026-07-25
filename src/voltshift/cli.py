@@ -261,16 +261,17 @@ def cmd_reset(_args) -> int:
 
 # ── closed loop ───────────────────────────────────────────────────────────────
 
-def _with_stack(fn, verify: bool = True):
+def _with_stack(fn, verify: bool = True, auto_fetch: bool = True):
     """Build the auto-tuning stack, run `fn(stack)`, then tear it down.
 
     `verify` measures which controls the card actually honours before tuning
     starts. It writes to the GPU, so read-only commands pass verify=False.
+    `auto_fetch` allows PresentMon to be installed on first use.
     """
     from . import autostack, gpuprofile
 
     with BridgeClient() as bridge:
-        stack = autostack.build(bridge, on_log=_log)
+        stack = autostack.build(bridge, on_log=_log, auto_fetch_frames=auto_fetch)
         try:
             recovery = autostack.recover_previous_session(stack)
             if recovery:
@@ -376,7 +377,7 @@ def cmd_autotune(args) -> int:
             _log(report.message)
         return 0
 
-    return _with_stack(run)
+    return _with_stack(run, auto_fetch=not args.no_download)
 
 
 def cmd_adaptive(args) -> int:
@@ -413,7 +414,7 @@ def cmd_adaptive(args) -> int:
             governor.stop(restore=True)
         return 0
 
-    return _with_stack(run)
+    return _with_stack(run, auto_fetch=not args.no_download)
 
 
 def cmd_knowledge(args) -> int:
@@ -545,6 +546,8 @@ def build_parser() -> argparse.ArgumentParser:
     auto.add_argument("--pairs", type=int, default=2,
                       help="candidate/baseline pairs per trial (default: %(default)s)")
     auto.add_argument("--game", help="attribute results to this exe name")
+    auto.add_argument("--no-download", action="store_true",
+                      help="do not fetch PresentMon if it is missing")
     auto.set_defaults(fn=cmd_autotune)
 
     adaptive = sub.add_parser("adaptive",
@@ -554,6 +557,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="in-game experiments allowed per game, 0 to disable")
     adaptive.add_argument("--probe-interval", type=float, default=120.0,
                           help="minimum seconds between probes (default: %(default)s)")
+    adaptive.add_argument("--no-download", action="store_true",
+                          help="do not fetch PresentMon if it is missing")
     adaptive.set_defaults(fn=cmd_adaptive)
 
     knowledge = sub.add_parser("knowledge", help="inspect what VoltShift has learned")

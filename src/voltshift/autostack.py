@@ -75,8 +75,15 @@ class AutoStack:
 def build(bridge: BridgeClient, on_log: Optional[Callable[[str, str], None]] = None,
           prefer_frame_source: Optional[str] = None,
           poll_interval_sec: float = 0.5,
-          knowledge_path: Optional[str] = None) -> AutoStack:
-    """Wire up telemetry, tuning, safety and memory for one GPU."""
+          knowledge_path: Optional[str] = None,
+          auto_fetch_frames: bool = True) -> AutoStack:
+    """Wire up telemetry, tuning, safety and memory for one GPU.
+
+    `auto_fetch_frames` lets VoltShift install PresentMon by itself the first
+    time it runs without a frame source. It happens on a background thread, so
+    startup never waits on the network, and the hub is upgraded in place the
+    moment the download lands.
+    """
     info = bridge.info()
     tuning = bridge.tuning_get()
 
@@ -89,6 +96,14 @@ def build(bridge: BridgeClient, on_log: Optional[Callable[[str, str], None]] = N
 
     hub = TelemetryHub(bridge, detect_frame_source(prefer_frame_source),
                        interval_sec=poll_interval_sec)
+
+    # No frame source on this machine yet: go and get one rather than making
+    # the user run a script. Frame data is what separates measuring a change
+    # from guessing at it, so it should not be opt-in.
+    if auto_fetch_frames and hub.frame_source.name == "none":
+        from .telemetry import fetch
+
+        fetch.ensure_in_background(hub, on_log)
 
     # The TDR poller reads the Windows Event Log, which needs pywin32; without
     # it the other four stability signals still work.

@@ -47,6 +47,9 @@ class AppState:
         self.governor = None
         self.goal = DEFAULT_GOAL
         self.recovery_notice: Optional[str] = None
+        # Frame-rate aware tuning installs itself on first run. Persisted so a
+        # user who turns it off is not asked again by a later launch.
+        self.auto_fetch_frames = True
 
         # Subscribers (all invoked on the Tk main thread).
         self.log_sinks: list[Callable[[str, str], None]] = []
@@ -98,7 +101,8 @@ class AppState:
         before the user can start another experiment on top of it.
         """
         try:
-            self.stack = autostack.build(self.bridge, on_log=self.log)
+            self.stack = autostack.build(self.bridge, on_log=self.log,
+                                         auto_fetch_frames=self.auto_fetch_frames)
             self.recovery_notice = autostack.recover_previous_session(self.stack)
             if self.recovery_notice:
                 self.log(self.recovery_notice, "error")
@@ -186,12 +190,18 @@ class AppState:
                 self.engine_config = EngineConfig.from_dict(data["engine"])
             if "boost" in data:
                 self.boost_config = BoostConfig.from_dict(data["boost"])
+            telemetry = data.get("telemetry", {})
+            self.auto_fetch_frames = bool(
+                telemetry.get("auto_fetch_presentmon", True))
+            self.goal = data.get("goal", self.goal)
         except (OSError, ValueError):
             pass
 
     def save_settings(self) -> None:
         data = {"engine": self.engine_config.to_dict(),
-                "boost": self.boost_config.to_dict()}
+                "boost": self.boost_config.to_dict(),
+                "goal": self.goal,
+                "telemetry": {"auto_fetch_presentmon": self.auto_fetch_frames}}
         tmp = paths.config_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)

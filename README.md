@@ -285,26 +285,41 @@ py -3.12 -m voltshift knowledge export    # everything, as JSON
 
 ## 📽 Frame data setup
 
-VoltShift tunes far better when it can see frames. Two sources, detected automatically:
+**Nothing to do — this sets itself up.** Frame data is what separates measuring a change from
+guessing at it, so it is not opt-in.
 
-**Intel PresentMon** (preferred — per-frame data for every game):
+On first run, if no frame source is present, VoltShift fetches Intel's **PresentMon** by
+itself. It happens on a background thread, so startup never waits on the network, and the
+telemetry hub is upgraded in place the moment the download lands — no restart.
 
-```
-powershell -ExecutionPolicy Bypass -File scripts\fetch_presentmon.ps1
-```
+Automatic does not mean opaque. The fetch:
 
-This downloads the console build from Intel's own release page into
-`third_party\presentmon\` and records the URL and SHA-256 in `source.json`. It is fetched
-rather than vendored so the binary you run is one you pulled from upstream, and so this
-repository does not redistribute a third-party executable. PresentMon is MIT-licensed and
-needs administrator rights for ETW tracing — which VoltShift already requires.
+- only talks to GitHub over HTTPS, and **validates every redirect target before following it**
+  (checking where you landed afterwards is too late — the request already happened);
+- takes the standalone console build from the official `GameTechDev/PresentMon` releases,
+  never an installer and never the background service;
+- verifies the payload really is a Windows executable before keeping it, so a rate-limit HTML
+  page cannot end up sitting there named `PresentMon.exe`;
+- downloads to a temporary file and moves it into place only after it passes, so a partial
+  download never looks usable;
+- writes the release tag, source URL and SHA-256 to `third_party\presentmon\source.json` so an
+  install can be audited later.
 
-**RivaTuner (RTSS)** — used automatically if it is already running. Gives average frametime
-only, so percentile lows are approximate.
+It is fetched rather than vendored so the binary you run comes from upstream and this
+repository redistributes nothing. PresentMon is MIT-licensed and needs administrator rights
+for ETW tracing — which VoltShift already requires.
 
-**Neither?** Everything still works. Auto-Tune falls back to power, clocks and thermals, says
-so in the log, and marks its results as measured blind. Efficiency and Silent goals remain
-meaningful; the frame-rate goals are much weaker without frame data.
+**To turn it off:** pass `--no-download` to `autotune` or `adaptive`, or set
+`telemetry.auto_fetch_presentmon` to `false` in `voltshift_config.json`. A machine that is
+offline simply carries on and retries at most once a day, rather than stalling every launch.
+
+`scripts\fetch_presentmon.ps1` still exists if you would rather do it by hand.
+
+**RivaTuner (RTSS)** — used automatically if it is already running, and preferred over
+downloading anything. Gives average frametime only, so percentile lows are approximate.
+
+**Neither available?** Everything still works. Auto-Tune falls back to power, clocks and
+thermals, says so in the log, and marks its results as measured blind.
 
 ---
 
@@ -319,7 +334,7 @@ meaningful; the frame-rate goals are much weaker without frame data.
 | 🛡 **Stability detection** | TDR, frametime spike trains, clock cliffs, process death, hard hang |
 | 💾 **Learned memory** | Per-game bests, cross-game transfer, per-silicon stability frontier |
 | 🔒 **Crash survival** | Journal-before-write, last-known-good restore, boot-time recovery |
-| 📽 **Frame telemetry** | PresentMon or RTSS: fps, 1% / 0.1% lows, frametime p99, stutter ratio, fps-per-watt |
+| 📽 **Frame telemetry** | Self-installing: fetches PresentMon on first run (verified, provenance recorded), or uses RTSS if already running |
 | ⚡ **Dynamic voltage engine** | N clock/voltage thresholds, hysteresis, live graph with threshold lines |
 | 🎛 **Manual tuning** | Voltage offset, core min/max clock, VRAM max clock + memory timing, power limit, TDC |
 | 🌀 **Fan control** | 5-point curve editor, ZeroRPM, min/target fan speed |
@@ -348,7 +363,7 @@ meaningful; the frame-rate goals are much weaker without frame data.
 | **Visual Studio 2022 Build Tools** | "Desktop development with C++" workload (to build the bridge) |
 | **CMake 3.16+** and **Git** | To build the bridge and fetch the ADLX SDK |
 | **Administrator rights** | Required for tuning writes and for PresentMon's ETW tracing |
-| *Intel PresentMon* | *Optional but recommended — `scripts\fetch_presentmon.ps1`* |
+| *Intel PresentMon* | *Fetched automatically on first run; no action needed* |
 
 ---
 
@@ -386,13 +401,10 @@ cmake --build build --config Release
 py -3.12 -m pip install -r requirements.txt
 ```
 
-### 3 — Optional: enable frame telemetry
+### 3 — Run VoltShift
 
-```
-powershell -ExecutionPolicy Bypass -File scripts\fetch_presentmon.ps1
-```
-
-### 4 — Run VoltShift
+Frame telemetry installs itself on first run — see [Frame data setup](#-frame-data-setup).
+Nothing to do here.
 
 > **Run your terminal as Administrator** — tuning writes require elevation.
 
