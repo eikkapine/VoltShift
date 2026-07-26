@@ -61,6 +61,11 @@ GOALS: dict[str, GoalWeights] = {
         description="Lowest heat and fan speed that keeps frame pacing intact.",
         fps_avg=0.15, fps_low=0.5, efficiency=0.8, power=0.7, stutter=1.0,
         thermal=1.2, noise=1.0),
+    "benchmark": GoalWeights(
+        label="Max Benchmark Score",
+        description=("Highest possible score. Power and heat are spent freely, "
+                     "limited only by the hard thermal guard."),
+        fps_avg=1.6, fps_low=0.8, stutter=0.4, thermal=0.05),
 }
 
 DEFAULT_GOAL = "balanced"

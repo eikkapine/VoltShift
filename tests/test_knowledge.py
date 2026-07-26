@@ -104,6 +104,43 @@ def test_frontier_ignores_missing_voltages(store):
     assert store.frontier_limit(GPU, 2900) is None
 
 
+def test_a_failure_at_stock_voltage_is_not_recorded(store):
+    """Undervolting cannot be the cause of a crash that happened without one.
+
+    Recording it would put the frontier at stock, which is above every value
+    the voltage knob can take — banning the entire search space permanently
+    with no way back.
+    """
+    store.record_failure(GPU, 0, 2900)
+    assert store.frontier_limit(GPU, 2900) is None
+
+
+def test_a_failure_above_stock_is_not_recorded(store):
+    store.record_failure(GPU, 25, 2900)
+    assert store.frontier_limit(GPU, 2900) is None
+
+
+def test_stock_voltage_can_be_specified_for_absolute_interfaces(store):
+    # On MGT2 the stock voltage is an absolute value, not 0.
+    store.record_failure(GPU, 1050, 2900, stock_mv=1000)
+    assert store.frontier_limit(GPU, 2900) is None
+    store.record_failure(GPU, 950, 2900, stock_mv=1000)
+    assert store.frontier_limit(GPU, 2900) == 950
+
+
+def test_real_undervolt_failures_are_still_recorded(store):
+    store.record_failure(GPU, -150, 2900)
+    assert store.frontier_limit(GPU, 2900) == -150
+
+
+def test_reset_frontier_clears_the_card(store):
+    store.record_failure(GPU, -150, 2900)
+    store.mark_unsafe(GPU, {"voltage_mv": -150}, "tdr")
+    store.reset_frontier(GPU)
+    assert store.frontier_limit(GPU, 2900) is None
+    assert store.unsafe_configs(GPU) == []
+
+
 def test_known_games_and_forget(store):
     store.record_best(GPU, "a.exe", "balanced", {"voltage_mv": -100}, 0.5)
     store.record_observation(GPU, "a.exe", "balanced", {"voltage_mv": -100}, 0.5)

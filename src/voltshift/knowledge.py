@@ -273,14 +273,25 @@ class KnowledgeStore:
     # ── stability frontier ───────────────────────────────────────────────────
 
     def record_failure(self, gpu: str, voltage_mv: Optional[int],
-                       clock_mhz: Optional[float]) -> None:
+                       clock_mhz: Optional[float],
+                       stock_mv: Optional[int] = None) -> None:
         """Teach the frontier that this voltage failed at this clock.
 
         Only the *least aggressive* failure per band is kept: if -150 mV once
         misbehaved, the fact that -180 mV also did adds nothing — -150 is
         already the binding constraint.
+
+        A failure at or above stock voltage is deliberately *not* recorded.
+        Undervolting cannot be the cause of something that happened without
+        one, and recording it would set the frontier at or above stock — which
+        is above every value the knob can take, banning the whole search space
+        permanently. `stock_mv` defaults to 0 because on the offset-style
+        interfaces stock is exactly 0.
         """
         if voltage_mv is None:
+            return
+        ceiling = 0 if stock_mv is None else stock_mv
+        if voltage_mv >= ceiling:
             return
         bucket = int((clock_mhz or 0) // CLOCK_BUCKET_MHZ)
         with self._lock:
@@ -316,6 +327,20 @@ class KnowledgeStore:
         if nearby:
             return max(nearby)
         return max(r["failed_mv"] for r in rows)
+
+    def reset_frontier(self, gpu: str) -> int:
+        """Forget the learned voltage frontier for one card.
+
+        Needed because the frontier is deliberately permanent: a single bad
+        entry would otherwise constrain the search forever, and a driver
+        update or a fixed cooling problem can make an old failure obsolete.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM frontier WHERE gpu_key = ?", (gpu,))
+            self._conn.execute("DELETE FROM unsafe WHERE gpu_key = ?", (gpu,))
+            self._conn.commit()
+            return cursor.rowcount
 
     def frontier(self, gpu: str) -> list[dict]:
         with self._lock:

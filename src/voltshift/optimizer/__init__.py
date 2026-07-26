@@ -1,6 +1,8 @@
 """Closed-loop tuning: search space, objective, model, safety, orchestration."""
 
 from .applier import RecordingApplier, TuningApplier
+from .benchsession import (BenchmarkConfig, BenchmarkReport, BenchmarkSession,
+                           BenchmarkTrial, seed_candidates)
 from .objective import DEFAULT_GOAL, GOALS, GoalWeights, Score, goal_choices, score_trial
 from .safeguard import Safeguard, Verdict
 from .session import (AutoTuneSession, SessionConfig, SessionReport, SessionState,
@@ -10,6 +12,8 @@ from .space import (MAX_CLOCK, MIN_CLOCK, POWER_LIMIT, VOLTAGE, VRAM_CLOCK, Knob
 
 __all__ = [
     "TuningApplier", "RecordingApplier",
+    "BenchmarkSession", "BenchmarkConfig", "BenchmarkReport", "BenchmarkTrial",
+    "seed_candidates",
     "GOALS", "DEFAULT_GOAL", "GoalWeights", "Score", "score_trial", "goal_choices",
     "Safeguard", "Verdict",
     "AutoTuneSession", "SessionConfig", "SessionReport", "SessionState", "TrialResult",

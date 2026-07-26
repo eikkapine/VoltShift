@@ -25,7 +25,8 @@
 |:---|:---|:---|
 | [What is VoltShift?](#-what-is-voltshift) | [Why it exists](#-why-does-this-exist) | [Architecture](#-architecture) |
 | [Auto-Tune](#-auto-tune--the-one-click-loop) | [Adaptive governor](#-adaptive-governor--tuning-while-you-play) | [How the optimiser works](#-how-the-optimiser-works) |
-| [Per-GPU verification](#-per-gpu-control-verification) | [What it remembers](#-what-it-remembers) | [Frame data setup](#-frame-data-setup) |
+| [Benchmark mode](#-benchmark-mode--tuning-for-maximum-score) | [Per-GPU verification](#-per-gpu-control-verification) | [What it remembers](#-what-it-remembers) |
+| [Frame data setup](#-frame-data-setup) | | |
 | [Feature matrix](#-feature-matrix) | | |
 | [Prerequisites](#-prerequisites) | [Build guide](#-build-guide) | [Using the GUI](#-using-the-gui) |
 | [Using the CLI](#-using-the-cli) | [Dynamic voltage engine](#-dynamic-voltage-engine) | [Bridge protocol](#-bridge-protocol) |
@@ -166,6 +167,46 @@ py -3.12 -m voltshift autotune --goal max_fps --trials 20 --window 10
 
 ---
 
+## 🏁 Benchmark mode — tuning for maximum score
+
+```
+py -3.12 -m voltshift benchtune --test TimeSpy
+```
+
+**Gameplay mode is the wrong tool for a benchmark, and will tell you the card is already
+well tuned.** That is not a bug in the tuning — it is the measurement method refusing to lie.
+Gameplay trials interleave candidate and baseline in short windows, which works when the load
+drifts unpredictably. Inside a Time Spy run, consecutive windows land in *different scenes* —
+Graphics Test 1 and Graphics Test 2 have very different loads — so the paired difference
+measures the scene change, the standard error explodes, and every result is correctly
+discarded as noise.
+
+A benchmark offers something gameplay never does: one precise, repeatable number over a fixed
+workload. So benchmark mode changes the unit of measurement to **one whole run**, and the
+objective to **the score itself**.
+
+- **Graphics score, not overall.** The overall score mixes in a CPU score VoltShift cannot
+  influence and which only adds noise — measured on one machine's history, the CPU subscore
+  varied by 3.7% run to run.
+- **No significance shrinkage.** A benchmark score is a measurement, not an estimate from a
+  drifting window, so the optimiser maximises it directly.
+- **A real noise floor instead.** Back-to-back Time Spy runs on the same settings differ by
+  about 0.18% (worst observed 1.17%), so a gain must clear `--min-gain` (default 0.4%) to be
+  believed, and the winner is re-run to confirm.
+- **The opening moves are not random.** Maximum score has well-understood directions: power
+  limit first, then an undervolt to buy sustained boost inside that power budget, then clock
+  and memory offsets. Random sampling would waste runs that each cost minutes. Pass
+  `--no-seed` to search from scratch anyway.
+- **A failed run is a stability signal.** 3DMark crashing or aborting right after a settings
+  change marks that configuration unsafe, exactly like a driver reset would.
+
+Results are read from `Documents\3DMark\*.3dmark-result` — a ZIP containing `Result.xml`. This
+works on **every 3DMark edition**; no Professional licence and no command-line automation
+needed. VoltShift applies a configuration, waits for you to run the benchmark, reads the score,
+and proposes the next one.
+
+---
+
 ## 🎮 Adaptive governor — tuning while you play
 
 ```
@@ -278,6 +319,7 @@ undervolting is a per-card exercise.
 py -3.12 -m voltshift knowledge stats     # summary + the learned frontier
 py -3.12 -m voltshift knowledge games     # best configuration per game
 py -3.12 -m voltshift knowledge forget cyberpunk2077.exe
+py -3.12 -m voltshift knowledge reset-frontier    # relearn this card's limits
 py -3.12 -m voltshift knowledge export    # everything, as JSON
 ```
 
@@ -328,6 +370,7 @@ thermals, says so in the log, and marks its results as measured blind.
 | Area | Details |
 |:---|:---|
 | 🎯 **Auto-Tune** | One click. Paired-trial search over voltage, clocks, VRAM and power against four goal presets, with confirmation before commit |
+| 🏁 **Benchmark mode** | Tunes for maximum 3DMark score: one run per trial, graphics score as the objective, measured noise floor, seeded opening moves |
 | 🎮 **Adaptive governor** | Per-game profiles, workload phase tagging, budgeted in-game probes, instant revert |
 | 🧠 **Bayesian optimiser** | numpy Gaussian process + expected improvement, transfer priors, pattern-search fallback |
 | 🔬 **Control verification** | Measures which knobs the driver actually honours instead of trusting advertised ranges; cached per card |
@@ -457,6 +500,7 @@ Unsupported controls are disabled automatically based on the bridge's capability
 
 ```
 py -3.12 -m voltshift autotune --goal balanced   # one-shot closed-loop tune
+py -3.12 -m voltshift benchtune --test TimeSpy   # tune for maximum benchmark score
 py -3.12 -m voltshift adaptive --probes 8        # live governor (Ctrl+C = stop + restore)
 py -3.12 -m voltshift verify                     # which controls this GPU really honours
 py -3.12 -m voltshift knowledge stats            # what this card has taught VoltShift

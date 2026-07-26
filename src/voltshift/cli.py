@@ -1,6 +1,7 @@
 """VoltShift command-line interface.
 
     voltshift autotune            find the best settings for what is running now
+    voltshift benchtune           tune for maximum benchmark score (3DMark)
     voltshift adaptive            live governor: learn and adapt while you play
     voltshift verify              measure which tuning controls this GPU honours
     voltshift knowledge ...       inspect what has been learned about this card
@@ -380,6 +381,69 @@ def cmd_autotune(args) -> int:
     return _with_stack(run, auto_fetch=not args.no_download)
 
 
+def cmd_benchtune(args) -> int:
+    """Tune against a benchmark score rather than a live gameplay window."""
+    from .optimizer.benchsession import BenchmarkConfig, BenchmarkSession
+    from . import benchmark as bm
+
+    _banner("benchmark tuning — maximise score")
+
+    def run(stack) -> int:
+        history = bm.history(test=args.test)
+        done = [r for r in history if not r.failed and r.objective]
+        if done:
+            best = max(r.objective for r in done)
+            _log(f"{len(done)} previous {args.test or 'benchmark'} runs on record, "
+                 f"best score {best:.0f}")
+
+        session = BenchmarkSession(
+            stack.hub, stack.applier, stack.space, stack.safeguard,
+            stack.new_optimizer(),
+            BenchmarkConfig(trials=args.trials, test=args.test,
+                            run_timeout_sec=args.timeout,
+                            min_gain_pct=args.min_gain,
+                            seed_candidates=not args.no_seed),
+            knowledge=stack.knowledge, watchdog=stack.watchdog,
+            stability=stack.stability, gpu_key=stack.gpu_key,
+            exe=(args.test or "benchmark").lower())
+        session.on_log = _log
+
+        def await_run(index: int, config: dict) -> None:
+            label = "confirmation run" if index < 0 else (
+                "baseline run" if index == 0 else f"run {index}")
+            print(f"\n{C.CYAN}  ▶  {label}: start the benchmark in 3DMark now{C.RESET}")
+            print(f"{C.DIM}     applied: {stack.space.describe(config)}{C.RESET}\n")
+
+        session.on_await_run = await_run
+
+        finished = threading.Event()
+        session.on_done = lambda report: finished.set()
+
+        def interrupt(_sig, _frame):
+            _log("stopping — restoring baseline", "warn")
+            session.stop()
+            finished.set()
+
+        signal.signal(signal.SIGINT, interrupt)
+        session.start()
+        while not finished.wait(0.5) and session.running:
+            pass
+        session.stop()
+
+        report = session.report
+        if report is None:
+            return 1
+        print()
+        if report.best_config:
+            _log(f"applied: {stack.space.describe(report.best_config)}", "volt")
+            _log(f"score:   {report.message}", "volt")
+        else:
+            _log(report.message)
+        return 0
+
+    return _with_stack(run, auto_fetch=False)
+
+
 def cmd_adaptive(args) -> int:
     from .adaptive import AdaptiveGovernor, ProbeBudget
     from .optimizer.objective import GOALS
@@ -448,6 +512,11 @@ def cmd_knowledge(args) -> int:
         elif args.knowledge_cmd == "forget":
             store.forget_game(key, args.game)
             _log(f"forgot everything learned about {args.game}")
+        elif args.knowledge_cmd == "reset-frontier":
+            removed = store.reset_frontier(key)
+            _log(f"cleared the stability frontier ({removed} band(s)) and the "
+                 f"unsafe set for this card", "volt")
+            _log("VoltShift will relearn the card's limits from scratch")
         elif args.knowledge_cmd == "export":
             print(json.dumps(store.export(), indent=2))
     finally:
@@ -566,9 +635,28 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_sub.add_parser("stats", help="summary and stability frontier")
     knowledge_sub.add_parser("games", help="best configuration per game")
     knowledge_sub.add_parser("export", help="dump everything as JSON")
+    knowledge_sub.add_parser(
+        "reset-frontier",
+        help="forget this card's learned voltage limits and unsafe set")
     p = knowledge_sub.add_parser("forget", help="erase what was learned for a game")
     p.add_argument("game", help="exe name, e.g. cyberpunk2077.exe")
     knowledge.set_defaults(fn=cmd_knowledge)
+
+    bench = sub.add_parser(
+        "benchtune", help="tune for maximum benchmark score (3DMark, Time Spy…)")
+    bench.add_argument("--test", default="TimeSpy",
+                       help="benchmark to tune for (default: %(default)s)")
+    bench.add_argument("--trials", type=int, default=20,
+                       help="configurations to try (default: %(default)s)")
+    bench.add_argument("--timeout", type=float, default=1200.0,
+                       help="seconds to wait for each run (default: %(default)s)")
+    bench.add_argument("--min-gain", type=float, default=0.4,
+                       help="percent gain that counts as real, not run-to-run "
+                            "noise (default: %(default)s)")
+    bench.add_argument("--no-seed", action="store_true",
+                       help="skip the known-good opening candidates and search "
+                            "from scratch")
+    bench.set_defaults(fn=cmd_benchtune)
 
     verify = sub.add_parser(
         "verify", help="measure which tuning controls this GPU actually honours")

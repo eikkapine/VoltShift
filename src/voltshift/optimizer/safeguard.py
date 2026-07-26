@@ -112,7 +112,16 @@ class Safeguard:
         limit = self.knowledge.frontier_limit(self.gpu_key, clock_mhz)
         if limit is None:
             return ALLOWED
+
         floor = limit + self.frontier_margin_mv
+        knob = self.space.knob(VOLTAGE)
+        if knob is not None and floor >= knob.high:
+            # A frontier at or above the highest voltage the knob can reach
+            # would reject every possible configuration, leaving the card
+            # untunable with no way back. A frontier that forbids everything
+            # is not information, so it is ignored rather than obeyed.
+            return ALLOWED
+
         if voltage < floor:
             return Verdict(False, f"{voltage}mV is below the learned stability "
                                   f"frontier for this card ({floor}mV with margin)")

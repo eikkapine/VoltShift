@@ -115,18 +115,42 @@ def test_safeguard_sanitise_pulls_into_range(space):
     assert safe[VOLTAGE] == -40
 
 
-def test_safeguard_honours_the_learned_frontier(space):
+def _frontier_knowledge(limit):
     class FrontierOnly:
         def unsafe_configs(self, gpu):
             return []
 
         def frontier_limit(self, gpu, clock):
-            return -140  # -140 mV once failed on this card
+            return limit
 
-    guard = Safeguard(space, knowledge=FrontierOnly(), gpu_key="card")
+    return FrontierOnly()
+
+
+def test_safeguard_honours_the_learned_frontier(space):
+    guard = Safeguard(space, knowledge=_frontier_knowledge(-140), gpu_key="card")
     assert not guard.check_frontier({VOLTAGE: -150})
     assert not guard.check_frontier({VOLTAGE: -130})   # inside the margin
     assert guard.check_frontier({VOLTAGE: -100})
+
+
+def test_a_frontier_that_forbids_everything_is_ignored(space):
+    """A frontier at stock would reject every value the knob can take.
+
+    That is not information, it is a corrupt entry, and obeying it leaves the
+    card permanently untunable with no way to recover.
+    """
+    guard = Safeguard(space, knowledge=_frontier_knowledge(0), gpu_key="card")
+    assert guard.check_frontier({VOLTAGE: 0})
+    assert guard.check_frontier({VOLTAGE: -100})
+    assert guard.check_frontier({VOLTAGE: -200})
+
+
+def test_a_frontier_just_below_stock_still_constrains(space):
+    # -20 + 15 margin = -5, which is still inside the -200..0 range, so it is
+    # real information and must be obeyed.
+    guard = Safeguard(space, knowledge=_frontier_knowledge(-20), gpu_key="card")
+    assert not guard.check_frontier({VOLTAGE: -100})
+    assert guard.check_frontier({VOLTAGE: 0})
 
 
 # ── objective ─────────────────────────────────────────────────────────────────
